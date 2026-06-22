@@ -1,0 +1,156 @@
+GNSS Multipath Classification using Range Residuals and Random Forest
+-----------------------------------------------------------------------
+Classifies GPS L1 satellite observations into LOS, Multipath, and NLOS
+based on range residual magnitude, then trains a Random Forest classifier
+on elevation, C/N0, and Doppler to learn the same classification from
+signal-quality features alone (without needing residuals at inference time).
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+
+DATA_PATH = "data/SATB_L1.xlsx"
+RESULTS_DIR = "results"
+
+
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    print(f"Loaded {len(df)} rows.")
+    print(f"Columns: {list(df.columns)}")
+    return df
+
+
+def plot_signal_strength_vs_elevation(df: pd.DataFrame, save_path: str = None):
+    plt.figure()
+    plt.scatter(df['Elevation-1 (deg)'], df['C/NO-1 (dB-Hz)'], s=5)
+    plt.xlabel("Elevation Angle (deg)")
+    plt.ylabel("C/N0 (dB-Hz)")
+    plt.title("Signal Strength vs Elevation")
+    plt.grid()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def plot_signal_strength_over_time(df: pd.DataFrame, save_path: str = None):
+    plt.figure()
+    plt.plot(df['TOWC (s)'], df['C/NO-1 (dB-Hz)'])
+    plt.xlabel("Time (s)")
+    plt.ylabel("C/N0 (dB-Hz)")
+    plt.title("Signal Strength Over Time")
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def plot_residual_vs_elevation(df: pd.DataFrame, save_path: str = None):
+    plt.figure()
+    plt.scatter(df['Elevation-1 (deg)'], df['Range Residuals-1 (m)'], s=5)
+    plt.xlabel("Elevation (deg)")
+    plt.ylabel("Range Residual (m)")
+    plt.title("Residual Error vs Elevation")
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def plot_skyplot(df: pd.DataFrame, save_path: str = None):
+    az = np.deg2rad(df['Azimuth-1 (deg)'])
+    el = 90 - df['Elevation-1 (deg)']
+
+    plt.figure(figsize=(6, 6))
+    ax = plt.subplot(111, polar=True)
+    ax.scatter(az, el, s=5)
+    ax.set_theta_zero_location('N')
+    ax.set_theta_direction(-1)
+    plt.title("Satellite Skyplot")
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def classify_by_residual(range_residual_m: float) -> str:
+    """
+    Physics-based label derived from range residual magnitude.
+    Smaller residuals indicate clean line-of-sight tracking; larger
+    residuals indicate multipath corruption or signal blockage (NLOS).
+    """
+    r = abs(range_residual_m)
+    if r < 0.3:
+        return "LOS"
+    elif r < 0.8:
+        return "Multipath"
+    else:
+        return "NLOS"
+
+
+def build_labels(df: pd.DataFrame) -> pd.DataFrame:
+    df["Label"] = df["Range Residuals-1 (m)"].apply(classify_by_residual)
+    print(df["Label"].value_counts())
+    return df
+
+
+def train_classifier(df: pd.DataFrame):
+    features = [
+        "Elevation-1 (deg)",
+        "C/NO-1 (dB-Hz)",
+        "Doppler-1 (Hz)",
+    ]
+
+    X = df[features].replace([np.inf, -np.inf], np.nan)
+    y = df["Label"]
+
+    valid = X.notna().all(axis=1)
+    X, y = X[valid], y[valid]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=y
+    )
+
+    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    print(classification_report(y_test, y_pred))
+
+    for f, imp in zip(features, model.feature_importances_):
+        print(f"{f}: {imp:.4f}")
+
+    return model, X_test, y_test, y_pred
+
+
+def plot_confusion_matrix(model, y_test, y_pred, save_path: str = None):
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(
+        cm, annot=True, fmt='d',
+        xticklabels=model.classes_, yticklabels=model.classes_
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.title("Confusion Matrix")
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
+
+
+def main():
+    df = load_data(DATA_PATH)
+
+    plot_signal_strength_vs_elevation(df, f"{RESULTS_DIR}/cn0_vs_elevation.png")
+    plot_signal_strength_over_time(df, f"{RESULTS_DIR}/cn0_vs_time.png")
+    plot_residual_vs_elevation(df, f"{RESULTS_DIR}/residual_vs_elevation.png")
+    plot_skyplot(df, f"{RESULTS_DIR}/skyplot.png")
+
+    df = build_labels(df)
+    model, X_test, y_test, y_pred = train_classifier(df)
+    plot_confusion_matrix(model, y_test, y_pred, f"{RESULTS_DIR}/confusion_matrix.png")
+
+
+if __name__ == "__main__":
+    main()
